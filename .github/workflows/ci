@@ -1,0 +1,183 @@
+
+name: Build and Deploy netflix.project
+
+on:
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: hostar-app
+
+  ECS_CLUSTER: neha-cluster
+  ECS_SERVICE: neha-service
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+
+    #########################################################
+    # CHECKOUT CODE
+    #########################################################
+
+    - name: Checkout Source Code
+      uses: actions/checkout@v4
+
+    #########################################################
+    # SETUP NODEJS
+    #########################################################
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 18
+
+    #########################################################
+    # INSTALL DEPENDENCIES
+    #########################################################
+
+    - name: Install Dependencies
+      run: npm install
+
+    #########################################################
+    # BUILD REACT APPLICATION
+    #########################################################
+
+    - name: Build React App
+      run: CI=false npm run build
+
+    #########################################################
+    # CONFIGURE AWS CREDENTIALS
+    #########################################################
+
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    #########################################################
+    # LOGIN TO AMAZON ECR
+    #########################################################
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    #########################################################
+    # GENERATE IMAGE TAG
+    #########################################################
+
+    - name: Generate Image Tag
+      run: |
+        echo "IMAGE_TAG=$(date +%s)" >> $GITHUB_ENV
+
+    #########################################################
+    # BUILD DOCKER IMAGE
+    #########################################################
+
+    - name: Build Docker Image
+      run: |
+        ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+        docker build -t $ECR_REPOSITORY:${IMAGE_TAG} .
+
+        docker tag $ECR_REPOSITORY:${IMAGE_TAG} \
+        $ACCOUNT_ID.dkr.ecr.${AWS_REGION}.amazonaws.com/$ECR_REPOSITORY:${IMAGE_TAG}
+
+    #########################################################
+    # TRIVY IMAGE SCAN
+    #########################################################
+
+    - name: Trivy Image Scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+        format: table
+        exit-code: 0
+        ignore-unfixed: true
+        severity: HIGH,CRITICAL
+
+    #########################################################
+    # PUSH IMAGE TO ECR
+    #########################################################
+
+    - name: Push Docker Image to ECR
+      run: |
+        ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+        docker push \
+        $ACCOUNT_ID.dkr.ecr.${AWS_REGION}.amazonaws.com/$ECR_REPOSITORY:${IMAGE_TAG}
+
+    #########################################################
+    # UPDATE ECS TASK DEFINITION
+    #########################################################
+
+    - name: Update ECS Task Definition
+      run: |
+        ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+        IMAGE_URI=$ACCOUNT_ID.dkr.ecr.${AWS_REGION}.amazonaws.com/$ECR_REPOSITORY:${IMAGE_TAG}
+
+        sed -i "s|IMAGE_URI|$IMAGE_URI|g" task-definition.json
+
+    #########################################################
+    # DEPLOY TO ECS
+    #########################################################
+
+    - name: Deploy to Amazon ECS
+      uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+      with:
+        task-definition: task-definition.json
+        service: ${{ env.ECS_SERVICE }}
+        cluster: ${{ env.ECS_CLUSTER }}
+        wait-for-service-stability: true
+
+    // #########################################################
+    // # COPY K8S FILES TO EC2
+    // #########################################################
+
+    // - name: Copy Kubernetes Manifests to EC2
+    //   uses: appleboy/scp-action@v0.1.7
+    //   with:
+    //     host: ${{ secrets.EC2_HOST }}
+    //     username: ubuntu
+    //     key: ${{ secrets.EC2_SSH_KEY }}
+    //     source: "k8s/*"
+    //     target: "/home/ubuntu/k8s"
+
+    // #########################################################
+    // # DEPLOY TO KIND CLUSTER
+    // #########################################################
+
+    // - name: Deploy Application to KIND Cluster
+    //   uses: appleboy/ssh-action@v1.0.3
+    //   with:
+    //     host: ${{ secrets.EC2_HOST }}
+    //     username: ubuntu
+    //     key: ${{ secrets.EC2_SSH_KEY }}
+    //     script: |
+
+    //       ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+    //       IMAGE_URI=$ACCOUNT_ID.dkr.ecr.${AWS_REGION}.amazonaws.com/$ECR_REPOSITORY:${IMAGE_TAG}
+
+    //       cd /home/ubuntu/k8s
+
+    //       # Replace image placeholder
+    //       sed -i "s|IMAGE_URI|$IMAGE_URI|g" deployment.yaml
+
+    //       # Apply Kubernetes manifests
+    //       kubectl apply -f deployment.yaml
+    //       kubectl apply -f service.yaml
+
+    //       # Verify deployment
+    //       kubectl get pods
+    //       kubectl get svc
+```
